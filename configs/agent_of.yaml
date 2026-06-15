@@ -1,0 +1,21 @@
+host: 127.0.0.1
+port: 3000
+team_name: of
+seed: 123
+total_timesteps: 500000
+model_path: models/zappy_ppo_of.zip
+graph_path: data/rewards_of.png
+timeout_seconds: 10.0
+max_steps_per_episode: 2000
+
+# Voir agent_br.yaml : 4 joueurs simultanes pour l'equipe "of".
+n_players: 4
+
+algo:
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 64
+  gamma: 0.995
+  gae_lambda: 0.95
+  ent_coef: 0.01
+  n_epochs: 10

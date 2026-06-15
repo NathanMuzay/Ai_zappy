@@ -1,0 +1,25 @@
+host: 127.0.0.1
+port: 3000
+team_name: Br
+seed: 42
+total_timesteps: 500000
+model_path: models/zappy_ppo_Br.zip
+graph_path: data/rewards_Br.png
+timeout_seconds: 10.0
+max_steps_per_episode: 2000
+
+# Nombre de joueurs (connexions simultanees) controles par cette politique
+# pour l'equipe Br. Permet de reunir plusieurs joueurs sur une meme case
+# pour satisfaire les conditions de groupe des elevations 2->8 (page 5).
+# Avec 4 joueurs, l'equipe peut viser jusqu'au palier 4->5 (qui demande
+# 4 joueurs du meme niveau).
+n_players: 4
+
+algo:
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 64
+  gamma: 0.995
+  gae_lambda: 0.95
+  ent_coef: 0.01
+  n_epochs: 10
