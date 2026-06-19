@@ -108,52 +108,14 @@ class ZappyEnv(gym.Env):
 
     def _reconnect_internal(self):
         """Rejoint le serveur en reutilisant notre propre slot fraichement libere.
-
-        Comportement identique a _connect() (meme handshake) mais avec un
-        rythme patient :
-        - ~200 essais au total
-        - 0.5 s d'attente quand le serveur renvoie un slot <= 0 (ko/rebus)
-        - 0.2 s d'attente quand le handshake n'est pas "WELCOME"
-        Reinitialise l'etat interne du drone (inventaire, vision, niveau).
+        
+        Comportement : try _connect() qui a 50 essais. Si saturation,
+        l'exception remonte et l'episode termine (reset() retentera).
         """
-        max_retries = 200
-        for attempt in range(max_retries):
-            try:
-                self._open_socket()
-                line = self._readline().strip()
-                if line != "WELCOME":
-                    self._close_socket()
-                    time.sleep(0.2)
-                    continue
-                self._send(self.team)
-                slots = self._readline().strip()
-
-                if not slots.lstrip("-").isdigit() or int(slots) <= 0:
-                    self._close_socket()
-                    time.sleep(0.5)
-                    continue
-
-                self.client_slots = int(slots)
-                dims = self._readline().strip()
-                parts = dims.split()
-                if len(parts) == 2 and all(p.isdigit() for p in parts):
-                    self.world = (int(parts[0]), int(parts[1]))
-
-                # Reinitialisation de l'etat interne (identique a reset)
-                self.state = self._empty_state()
-                self._set_level(1)
-                self._refresh_inventory()
-                self._refresh_vision()
-                return
-
-            except (ConnectionError, OSError):
-                self._close_socket()
-                time.sleep(0.5)
-
-        raise ConnectionError(
-            "Reconnexion interne impossible pour agent %d apres %d essais"
-            % (self.agent_id, max_retries)
-        )
+        self._connect()
+        self._set_level(1)
+        self._refresh_inventory()
+        self._refresh_vision()
 
     def _send_and_wait(self, cmd: str) -> str:
         self._send(cmd)
@@ -191,12 +153,10 @@ class ZappyEnv(gym.Env):
         parse_look retourne list[dict] avec cle 'food' pour chaque tuile.
         Les tuiles sont en ordre radial :
           tile 0 = case actuelle (distance 0)
-          tiles 1-6 = les 8 cases directement autour
-          puis anneaux externes...
+          tiles 1+ = anneaux externes...
 
         Retourne l'index (float) de la premiere tuile avec food > 0,
         ou None si aucune food visible.
-        Le maximum visible = vision_tile_count(level=1) = 9 tuiles (0..8).
         """
         vision = self.state["vision"]
         if not vision:
@@ -215,7 +175,6 @@ class ZappyEnv(gym.Env):
         line = self._send_and_wait("Look")
         if line != "dead":
             self.state["vision"] = protocol.parse_look(line)
-            # Met a jour food_dist APRES parsing de la vision (INCLU dans prev pour rewards)
             self.state["food_dist"] = self._food_distance()
 
     def _set_level(self, level: int):
@@ -236,27 +195,23 @@ class ZappyEnv(gym.Env):
                 tile = vision[tile_idx]
                 for i, r in enumerate(protocol.RESOURCES):
                     obs[offset + i] = min(tile[r] / 5.0, 1.0)
-        # Progression de l'équipe vers la victoire (coordination)
         if self.team_state is not None:
             obs[23] = self.team_state.max_level_count() / self.team_state.win_count
-        # NOTE : shape=(24,) est saturee (0-6=res, 7=lvl, 8=food_inv,
-        #        9-15=tile[0], 16-22=tile[1], 23=team).
-        # food_dist n'est PAS expose dans l'obs (pas de slot libre).
-        # Voir README_FIX_APPRENTISSAGE.md pour details et recommandation.
         return obs
 
     # ----- API gym -----
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.steps = 0
+        was_dead = not self.state["alive"]
         self.state = self._empty_state()
-        # Reutilise la connexion existante si elle est encore vivante ;
-        # ouvre une nouvelle socket uniquement si aucune n'existe.
+        if was_dead:
+            self._close_socket()
         if self.sock is None:
             self._connect()
-            self._set_level(1)
-            self._refresh_inventory()
-            self._refresh_vision()
+        self._set_level(1)
+        self._refresh_inventory()
+        self._refresh_vision()
         return self._build_obs(), {}
 
     def step(self, action: int):
@@ -270,8 +225,6 @@ class ZappyEnv(gym.Env):
             "level": self.state["level"],
             "inventory": dict(self.state["inventory"]),
             "alive": self.state["alive"],
-            # food_dist est pre-rempli ici depuis l'etat courant AVANT action.
-            # compute_reward aura ainsi prev["food_dist"] disponible.
             "food_dist": self.state.get("food_dist"),
         }
         event = {"action": cmd}
@@ -287,10 +240,9 @@ class ZappyEnv(gym.Env):
                 try:
                     self._reconnect_internal()
                     return self._build_obs(), reward, False, False, event
-                except ConnectionError:
-                    # Serveur sature : on termine l'episode proprement,
-                    # SB3 rappellera reset() qui retentera la connexion.
-                    logger.info("Agent %s MORT (reward=%.1f)", self.agent_id, reward)
+                except ConnectionError as exc:
+                    logger.warning("Reconnexion impossible apres mort (agent %s): %s", 
+                                   self.agent_id, exc)
                     self._close_socket()
                     return self._build_obs(), reward, True, False, event
 
@@ -315,7 +267,7 @@ class ZappyEnv(gym.Env):
             elif cmd == "Incantation":
                 old_level = self.state["level"]
                 if response.startswith("Elevation"):
-                    final = self._read_next()  # 'Current level: N' SPONTANE
+                    final = self._read_next()
                     m = final.split(":")[-1].strip() if ":" in final else None
                     if m and m.isdigit():
                         self._set_level(int(m))
@@ -332,9 +284,12 @@ class ZappyEnv(gym.Env):
             self.state["alive"] = False
             event["death"] = True
             reward = compute_reward(prev, self.state, event)
-            # Reconnexion interne : la perte de socket ne termine PAS l'episode.
             self._close_socket()
-            self._reconnect_internal()
+            try:
+                self._reconnect_internal()
+            except ConnectionError:
+                logger.warning("Reconnexion impossible apres loss (agent %s)", 
+                               self.agent_id)
             return self._build_obs(), reward, False, False, event
 
         reward = compute_reward(prev, self.state, event)

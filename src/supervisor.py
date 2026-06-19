@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Superviseur Zappy — relance automatique du serveur quand les接客 sont épuisés.
+Superviseur Zappy — relance automatique du serveur quand les oeufs sont épuisés.
 =====================================================================
 
 Problème résolu :
@@ -37,7 +37,7 @@ PORT         = 4242
 WIDTH        = 10
 HEIGHT       = 10
 TEAM         = "ia"
-CLIENTS      = 200          # taille du pool d'oeufs
+CLIENTS      = 200          # taille du pool d'oeufs (max autorise)
 FREQ         = 100
 LOG_FILE     = "logs/server.log"
 PID_FILE     = ".server.pid"
@@ -65,21 +65,31 @@ def log(msg: str) -> None:
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[supervisor {stamp}] {msg}", flush=True)
 
-
 # ----------------------------------------------------------------------
-# Vérification de santé TCP
+# Vérification de santé TCP (handshake reel Zappy)
 # ----------------------------------------------------------------------
-def server_is_alive(port: int, timeout: float = 1.0) -> bool:
+def server_has_slots(port: int, team: str, timeout: float = 1.0) -> bool:
     """
-    Tente une connexion TCP rapide sur le port.
-    Retourne True si on établit une connexion, False sinon.
+    Ouvre un vrai handshake Zappy et verifie qu'il reste des oeufs.
+    Une simple connexion TCP ne suffit pas : un serveur a oeufs epuises
+    accepte la socket, renvoie WELCOME puis un slot <= 0.
     """
     try:
-        with socket.create_connection(("localhost", port), timeout=timeout):
-            return True
-    except (OSError, socket.error):
+        with socket.create_connection(("localhost", port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            buf = b""
+            while b"\n" not in buf:
+                buf += s.recv(256)
+            if not buf.startswith(b"WELCOME"):
+                return False
+            s.sendall((team + "\n").encode())
+            buf = buf.split(b"\n", 1)[1] if b"\n" in buf else b""
+            while b"\n" not in buf:
+                buf += s.recv(256)
+            slots = buf.split(b"\n", 1)[0].strip()
+            return slots.lstrip(b"-").isdigit() and int(slots) > 0
+    except (OSError, ValueError):
         return False
-
 
 def get_server_pid(pid_file: str) -> int | None:
     """Lit le PID du serveur depuis le fichier .server.pid."""
@@ -89,7 +99,6 @@ def get_server_pid(pid_file: str) -> int | None:
     except (FileNotFoundError, ValueError):
         return None
 
-
 def is_process_alive(pid: int) -> bool:
     """Vérifie si un processus existe encore (évite les PID réutilisés)."""
     try:
@@ -97,7 +106,6 @@ def is_process_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
-
 
 # ----------------------------------------------------------------------
 # Lancement / arrêt du serveur
@@ -122,7 +130,6 @@ def launch_server() -> subprocess.Popen[bytes]:
     log(f"Serveur lance (PID={proc.pid}) — log dans {LOG_FILE}")
     return proc
 
-
 def kill_server(proc: subprocess.Popen[bytes] | None, pid: int | None) -> None:
     """Tente de tuer le serveur proprement, puis violemment si nécessaire."""
     if proc:
@@ -135,7 +142,6 @@ def kill_server(proc: subprocess.Popen[bytes] | None, pid: int | None) -> None:
             proc.wait()
             log("Serveur tue violemment (kill).")
 
-    # Nettoyage supplémentaire via PID fichier
     if pid and is_process_alive(pid):
         try:
             os.kill(pid, signal.SIGTERM)
@@ -146,12 +152,11 @@ def kill_server(proc: subprocess.Popen[bytes] | None, pid: int | None) -> None:
         except OSError:
             pass
 
-
 # ----------------------------------------------------------------------
 # Boucle de surveillance
 # ----------------------------------------------------------------------
 HEALTH_CHECK_INTERVAL = 5   # secondes entre chaque vérification
-DOWN_GRACE            = 20   # secondes avant de considérer le serveur mort
+DOWN_GRACE            = 20  # secondes avant de considérer le serveur mort
 
 def main() -> None:
     log("Demarrage du supervisor.")
@@ -177,9 +182,7 @@ def main() -> None:
     proc = launch_server()
     current_pid = proc.pid
 
-    # Temps depuis lequel le serveur est considéré "down"
     down_since: float | None = None
-
     running = True
 
     def signal_handler(signum: int, _frame) -> None:
@@ -198,7 +201,6 @@ def main() -> None:
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT,  signal_handler)
 
-    # Écrire notre propre PID pour que le Makefile puisse nous tuer
     with open(SUP_PID_FILE, "w") as f:
         f.write(str(os.getpid()) + "\n")
 
@@ -211,7 +213,6 @@ def main() -> None:
         # 1) Le processus serveur est-il mort ?
         proc_poll = proc.poll() if proc else None
         if proc_poll is not None:
-            # Le processus a terminé tout seul
             log("Le processus serveur est mort (code=%s). Relance." % proc_poll)
             kill_server(proc, current_pid)
             time.sleep(2)
@@ -220,28 +221,24 @@ def main() -> None:
             down_since = None
             continue
 
-        # 2) Le port est-il joignable ?
-        if not server_is_alive(PORT):
+        # 2) Le serveur a-t-il des slots disponibles ?
+        if not server_has_slots(PORT, TEAM):
             if down_since is None:
                 down_since = time.time()
-                log("Serveur injoignable — debut du comptage.")
+                log("Serveur injoignable ou oeufs epuises — debut du comptage.")
             else:
                 elapsed = time.time() - down_since
                 if elapsed >= DOWN_GRACE:
-                    log("Serveur injoignable depuis > %ds — "
-                        "relance serveur (oeufs epuises ?" % DOWN_GRACE)
+                    log("Serveur injoignable depuis >= %ds — relance serveur." % DOWN_GRACE)
                     kill_server(proc, current_pid)
                     time.sleep(2)
                     proc = launch_server()
                     current_pid = proc.pid
                     down_since = None
-                # else: on attend encore, le serveur peut revenir
         else:
-            # Serveur joignable → on reset le compteur
             if down_since is not None:
                 log("Serveur a nouveau joignable.")
                 down_since = None
-
 
 if __name__ == "__main__":
     main()

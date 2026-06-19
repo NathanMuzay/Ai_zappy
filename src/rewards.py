@@ -46,7 +46,7 @@ def compute_reward(prev: dict, state: dict, event: dict) -> float:
     if event.get("death"):
         return r - 10.0
 
-    # === SHAPING NOURRITURE (ajoute en AMONT du bloc existant) ===
+    # === SHAPING NOURRITURE ===
 
     # 1) Rapprochement vers la nourriture visible
     prev_dist = prev.get("food_dist")
@@ -57,9 +57,12 @@ def compute_reward(prev: dict, state: dict, event: dict) -> float:
         elif cur_dist > prev_dist:
             r -= 0.1   # s'eloigne de la food
 
-    # 2) Sur une case food sans manger (penalite forte)
+    # 2) Sur une case food sans manger (penalite)
     if cur_dist == 0 and action != "Take food":
         r -= 0.2
+
+    # 3) Bonus survie/step (evite la famine passive)
+    r += 0.05
 
     # === FIN SHAPING NOURRITURE ===
 
@@ -72,8 +75,8 @@ def compute_reward(prev: dict, state: dict, event: dict) -> float:
             r += 0.5
         else:
             r += 0.05
-    if food < 30:
-        r -= 0.1
+    if food < 15:
+        r -= 0.05
 
     # d) Take / Set pierre
     if action.startswith("Take ") and event.get("ok"):
@@ -114,4 +117,9 @@ def compute_reward(prev: dict, state: dict, event: dict) -> float:
                 r += 100.0
             else:
                 r += 10 + 5 * difficulty(old) * max(delta, 1)
+
+    # g) Fork : regenere le pool d'oeufs de l'equipe
+    if action == "Fork" and event.get("ok"):
+        r += 5.0
+
     return r
