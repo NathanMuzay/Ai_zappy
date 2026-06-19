@@ -50,21 +50,27 @@ class CurriculumCallback(BaseCallback):
 class ZappyCallback(BaseCallback):
     """Logging des metriques toutes les N steps."""
     
-    def __init__(self, log_interval=60000, verbose=0):
+    def __init__(self, interval_sec=30, verbose=0):
         super().__init__(verbose)
-        self.log_interval = log_interval
-        self.last_log = 0
-    
+        self.interval_sec = interval_sec
+        self.last_time = time.time()
+        self.rewards = []
+
     def _on_step(self) -> bool:
-        if self.num_timesteps - self.last_log >= self.log_interval:
-            elapsed = time.time() - self.model.start_time
-            fps = self.num_timesteps / max(elapsed, 1)
+        # collecte des rewards du batch courant
+        rews = self.locals.get("rewards")
+        if rews is not None:
+            self.rewards.extend(np.asarray(rews).tolist())
+
+        now = time.time()
+        if now - self.last_time >= self.interval_sec:
+            mean_r = float(np.mean(self.rewards)) if self.rewards else 0.0
             logger.info(
-                f"steps={self.num_timesteps} | "
-                f"fps={fps:.0f} | "
-                f"elapsed={elapsed:.0f}s"
+                "steps=%d | mean_reward=%.3f | n=%d",
+                self.num_timesteps, mean_r, len(self.rewards)
             )
-            self.last_log = self.num_timesteps
+            self.rewards.clear()
+            self.last_time = now
         return True
 
 def make_env(rank, host, port, team, client_id, team_state):
@@ -133,8 +139,9 @@ def main():
     # Callbacks
     callbacks = [
         CurriculumCallback(verbose=0),
-        ZappyCallback(log_interval=60000, verbose=0),
+        ZappyCallback(interval_sec=30, verbose=0),
     ]
+
     
     try:
         # Entraînement principal

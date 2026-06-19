@@ -99,9 +99,10 @@ class ZappyEnv(gym.Env):
             )
 
     def _connect(self):
-        """Connexion handshake. Retry tant que slots epuises (slots <= 0)."""
-        max_retries = 50
-        for attempt in range(max_retries):
+        """Connexion handshake. Retry quasi-infini tant que slots epuises."""
+        attempt = 0
+        while True:
+            attempt += 1
             try:
                 self._open_socket()
                 self._expect("WELCOME")
@@ -110,7 +111,11 @@ class ZappyEnv(gym.Env):
 
                 if not slots.lstrip("-").isdigit() or int(slots) <= 0:
                     self._close_socket()
-                    time.sleep(0.3)
+                    time.sleep(0.5)
+                    if attempt % 40 == 0:
+                        logger.warning(
+                            "Agent %s : attente slot libre (essai %d)",
+                            self.agent_id, attempt)
                     continue
 
                 self.client_slots = int(slots)
@@ -121,10 +126,11 @@ class ZappyEnv(gym.Env):
                 return
             except (ConnectionError, OSError):
                 self._close_socket()
-                time.sleep(0.3)
-        raise ConnectionError(
-            "Impossible de se connecter apres %d essais" % max_retries
-        )
+                time.sleep(0.5)
+                if attempt % 40 == 0:
+                    logger.warning(
+                        "Agent %s : serveur injoignable (essai %d)",
+                        self.agent_id, attempt)
 
     def _send_and_wait(self, cmd: str) -> str:
         self._send(cmd)
@@ -237,62 +243,67 @@ class ZappyEnv(gym.Env):
         event = {"action": cmd}
 
         try:
-            response = self._send_and_wait(cmd)
+            return self._do_step(cmd, prev, event)
+        except (ConnectionError, OSError) as e:
+            msg = str(e)
+            # Coupures "normales" (mort / pool epuise) : log discret en debug
+            if any(k in msg for k in ("fermée", "fermee", "Broken pipe", "Errno 32")):
+                logger.debug("Agent %s : reconnexion (%s)", self.agent_id, msg)
+            else:
+                logger.warning("Connexion perdue (agent %s): %s", self.agent_id, e)
+            self._close_socket()
+            try:
+                self._reconnect_internal()
+            except (ConnectionError, OSError):
+                logger.error(
+                    "Agent %s : reconnexion impossible, episode termine",
+                    self.agent_id)
+                self._close_socket()
+                return self._build_obs(), -1.0, True, False, event
+            return self._build_obs(), 0.0, False, False, event
 
-            if response == "dead":
-                self.state["alive"] = False
-                event["death"] = True
-                reward = compute_reward(prev, self.state, event)
-                logger.info("Agent %s MORT (reward=%.1f)", self.agent_id, reward)
-                try:
-                    self._reconnect_internal()
-                    return self._build_obs(), reward, False, False, event
-                except ConnectionError:
-                    logger.info("Agent %s MORT et serveur sature", self.agent_id)
-                    self._close_socket()
-                    return self._build_obs(), reward, True, False, event
+    def _do_step(self, cmd: str, prev: dict, event: dict):
+        """Logique reelle d'un step. Peut lever ConnectionError/OSError,
+        rattrapee par step()."""
+        response = self._send_and_wait(cmd)
 
-            if cmd.startswith("Take"):
-                event.update({"ok": response == "ok"})
-                self._refresh_inventory()
-            elif cmd.startswith("Set"):
-                event.update({"ok": response == "ok"})
-                self._refresh_inventory()
-            elif cmd == "Inventory":
-                self.state["inventory"] = protocol.parse_inventory(response)
-            elif cmd == "Look":
-                self.state["vision"] = protocol.parse_look(response)
-                self.state["food_dist"] = self._food_distance()
-            elif cmd == "Connect_nbr":
-                event.update({"type": "connect_nbr",
-                              "slots": int(response) if response.isdigit() else 0})
-            elif cmd == "Fork":
-                event.update({"type": "fork", "ok": response == "ok"})
-            elif cmd == "Eject":
-                event.update({"type": "eject", "ok": response == "ok"})
-            elif cmd == "Incantation":
-                old_level = self.state["level"]
-                if response.startswith("Elevation"):
-                    final = self._read_next()
-                    m = final.split(":")[-1].strip() if ":" in final else None
-                    if m and m.isdigit():
-                        self._set_level(int(m))
-                        event.update({"level_up": True, "old_level": old_level})
-                        if self.state["level"] >= protocol.MAX_LEVEL:
-                            event["win"] = True
-                    else:
-                        event.update({"ko": True})
-                else:
-                    event.update({"ko": True})
-
-        except (BrokenPipeError, ConnectionError, OSError) as exc:
-            logger.warning("Connexion perdue (agent %s): %s", self.agent_id, exc)
+        if response == "dead":
             self.state["alive"] = False
             event["death"] = True
             reward = compute_reward(prev, self.state, event)
             self._close_socket()
             self._reconnect_internal()
             return self._build_obs(), reward, False, False, event
+
+        # Traitement de la reponse selon la commande
+        if cmd == "Look":
+            self.state["vision"] = protocol.parse_look(response)
+            event["ok"] = True
+        elif cmd == "Inventory":
+            self._parse_inventory(response)
+            event["ok"] = True
+        elif cmd == "Incantation":
+            if response.startswith("Elevation"):
+                # On lit la ligne de niveau qui suit
+                level_line = self._read_next()
+                if level_line.startswith("Current level"):
+                    new_level = int(level_line.split(":")[1].strip())
+                    self.state["level"] = new_level
+                    event["elevation"] = True
+                    if self.team_state is not None:
+                        self.team_state.update(self.agent_id, new_level)
+                    if self.state["level"] >= protocol.MAX_LEVEL:
+                        event["win"] = True
+                else:
+                    event["ko"] = True
+            else:
+                event["ko"] = True
+        else:
+            # Forward, Right, Left, Take, Set, Fork, Eject, Connect_nbr...
+            if response == "ok":
+                event["ok"] = True
+            else:
+                event["ko"] = True
 
         reward = compute_reward(prev, self.state, event)
         team_won = self.team_state is not None and self.team_state.is_victory()

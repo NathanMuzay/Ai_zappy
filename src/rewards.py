@@ -39,86 +39,60 @@ def needed_on_tile(level: int, stone: str) -> int:
     return ELEVATION.get(level, {}).get(stone, 0)
 
 def compute_reward(prev: dict, state: dict, event: dict) -> float:
-    """
-    Reward avec CURRICULUM LEARNING :
-    
-    PHASE 1 (0-500k steps) : FOCUS SURVIE
-    - Reward food TRES haut (+10.0 quand on en prend)
-    - Penalty mort très forte (-20.0)
-    - Fork reward baissé (ne pas le forcer trop tôt)
-    
-    PHASE 2 (500k-2M steps) : FOCUS REPRODUCTION
-    - Reward food réduit (+2.0, déjà maîtrisé)
-    - Fork reward maximal (+8.0, focus reproduction)
-    - Incantation bonus augmenté (progression naturelle)
-    """
     if event is None:
         event = {}
-    
+
     r = 0.0
     action = event.get("action", "")
     level = state.get("level", 1)
     food = state.get("inventory", {}).get("food", 0)
     phase = get_phase()
-    
-    # === a) Coût du temps ===
+
+    # === a) Coût du temps (réduit) ===
     if action == "Incantation":
-        r -= 0.43
-    elif action:
-        r -= 0.01
-    
+        r -= 0.1
+    # plus de pénalité par action : on veut que survivre soit rentable
+
     # === b) Mort ===
     if event.get("death"):
         if phase == 1:
-            return r - 20.0  # PHASE 1 : très pénalisé (survie d'abord)
-        else:
-            return r - 10.0  # PHASE 2 : moins pénalisé (déjà stable)
-    
-    # === SHAPING NOURRITURE (adapté à la phase) ===
-    
-    # 1) Rapprochement vers la nourriture visible
+            return r - 10.0
+        return r - 5.0
+
+    # === SHAPING NOURRITURE ===
     prev_dist = prev.get("food_dist")
     cur_dist = state.get("food_dist")
     if cur_dist is not None and prev_dist is not None:
         if cur_dist < prev_dist:
-            r += 0.3   # se rapproche de la food
+            r += 0.3
         elif cur_dist > prev_dist:
-            r -= 0.1   # s'éloigne de la food
-    
-    # 2) Sur une case food sans manger (pénalité)
-    if cur_dist == 0 and action != "Take food":
-        r -= 0.2
-    
-    # 3) Baseline (survie minimum)
-    r += 0.05
-    
-    # === c) Ramasser de la nourriture (PHASE-DEPENDENT) ===
+            r -= 0.05
+
+    # Baseline survie : VIVRE EST POSITIF (clef de la phase 1)
+    r += 0.1
+
+    # === c) Ramasser nourriture ===
     prev_food = prev.get("inventory", {}).get("food", 0)
     if food > prev_food:
         if phase == 1:
-            # PHASE 1 : LA NOURRITURE EST CRITIQUE
             if food < 30:
-                r += 10.0   # WAS: 2.0 → +400%
+                r += 10.0
             elif food < 126:
-                r += 5.0    # WAS: 0.5 → +900%
+                r += 5.0
             else:
-                r += 2.0    # WAS: 0.05
+                r += 2.0
         else:
-            # PHASE 2 : Déjà capable de trouver food, focus autre
             if food < 30:
                 r += 2.0
             elif food < 126:
                 r += 0.5
             else:
                 r += 0.05
-    
-    # Pénalité si food faible (famine)
-    if food < 15:
-        if phase == 1:
-            r -= 0.2    # WAS: 0.05 → plus d'urgence
-        else:
-            r -= 0.05
-    
+
+    # Famine (seuil bas seulement)
+    if food < 10:
+        r -= 0.1
+
     # === d) Take / Set pierre ===
     if action.startswith("Take ") and event.get("ok"):
         stone = action.split(" ", 1)[1]
@@ -142,15 +116,14 @@ def compute_reward(prev: dict, state: dict, event: dict) -> float:
                 r -= 0.2
             else:
                 r -= 0.1
-    
-    # === e) Take / Set rate (ok == False) ===
+
     if action.startswith(("Take ", "Set ")) and event.get("ok") is False:
         r -= 0.05
-    
+
     # === f) Incantation ===
     if action == "Incantation":
         if event.get("ko"):
-            r -= 2.0
+            r -= 1.0
         elif event.get("level_up"):
             old = event.get("old_level", level)
             delta = state.get("level", old) - old
@@ -158,14 +131,12 @@ def compute_reward(prev: dict, state: dict, event: dict) -> float:
                 r += 100.0
             else:
                 r += 10 + 5 * difficulty(old) * max(delta, 1)
-    
-    # === g) Fork (ACTIVÉ SEULEMENT EN PHASE 2) ===
+
+    # === g) Fork ===
     if action == "Fork" and event.get("ok"):
         if phase == 1:
-            # PHASE 1 : Fork non encouragé (concentre-toi sur la survie)
             r += 0.5
         else:
-            # PHASE 2 : Fork EST LA CLEF pour régénérer le pool
             r += 8.0
-    
+
     return r
