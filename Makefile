@@ -1,35 +1,69 @@
-PYTHON = python3
-SRC    = src
-CONFIGS = configs
+PORT         ?= 4242
+WIDTH        ?= 10
+HEIGHT       ?= 10
+TEAM         ?= ia
+CLIENTS      ?= 6
+SERVER_SLOTS := $(shell echo $$(($(CLIENTS)*2)))
+FREQ         ?= 100
+DURATION     ?= 3600
+TIMESTEPS    ?= 2000000
+RESUME       ?=
 
-.PHONY: all train server gui eval clean fclean re help
+SERVER     = ./zappy_server
+GUI        = ./zappygui.AppImage
+PYTHON     = python3
+VENV       = .venv
 
-all: train
 
-train:
-	@mkdir -p models data
-	$(PYTHON) $(SRC)/train_dual.py \
-		--config-a $(CONFIGS)/agent_br.yaml \
-		--config-b $(CONFIGS)/agent_of.yaml
+all: server
+	@sleep 4
+	$(MAKE) train
+	$(MAKE) stop
+
+install:
+	$(PYTHON) -m venv $(VENV)
+	$(VENV)/bin/pip install --upgrade pip
+	$(VENV)/bin/pip install -r requirements.txt
 
 server:
-	./zappy_server -p 3000 -x 15 -y 10 -n Br of -c 20 -f 10000 --auto-start on --display-eggs true
+	-@kill `cat .supervisor.pid` 2>/dev/null || true
+	-@kill `cat .server.pid` 2>/dev/null || true
+	-@fuser -k $(PORT)/tcp 2>/dev/null || true
+	@sleep 1
+	@echo "Supervisor + serveur lances (logs -> logs/server.log)"
+	$(PYTHON) src/supervisor.py &
+	@echo $$! > .supervisor.pid
+	@sleep 3
 
 gui:
-	./zappygui.AppImage -p 3000
+	$(GUI) -h localhost -p $(PORT)
+
+train:
+	@echo "Demarrage entrainement (RESUME=$(RESUME))"
+	$(VENV)/bin/python -m src.train \
+		--host localhost \
+		--port $(PORT) \
+		--team $(TEAM) \
+		--clients $(CLIENTS) \
+		--timesteps $(TIMESTEPS) \
+		$(if $(RESUME),--resume $(RESUME),)
+
+tensorboard:
+	$(VENV)/bin/tensorboard --logdir logs/tb
+
+stop:
+	-@kill `cat .supervisor.pid` 2>/dev/null || true
+	-@kill `cat .server.pid` 2>/dev/null || true
+	-@fuser -k $(PORT)/tcp 2>/dev/null || true
+	-@rm -f .supervisor.pid .server.pid
+	@echo "Supervisor + serveur arretes"
 
 clean:
-	@rm -f data/*.log data/*.png
+	rm -rf __pycache__ src/__pycache__ .server.pid .supervisor.pid
 
-fclean: clean
-	@rm -f models/zappy_ppo_Br.zip models/zappy_ppo_of.zip
+fclean: clean stop
+	rm -rf data logs $(VENV)
 
 re: fclean all
 
 help:
-	@echo "make          -> entrainement complet (2 agents)"
-	@echo "make server   -> serveur seul"
-	@echo "make gui      -> GUI"
-	@echo "make clean    -> supprime logs/graphes"
-	@echo "make fclean   -> supprime logs/graphes/modeles"
-	@echo "make re       -> repart de zero"
