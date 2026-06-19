@@ -6,7 +6,7 @@ CLIENTS      ?= 6
 SERVER_SLOTS := $(shell echo $$(($(CLIENTS)*2)))
 FREQ         ?= 100
 DURATION     ?= 3600
-TIMESTEPS    ?= 2000000
+TIMESTEPS    ?= 500000
 RESUME       ?=
 
 SERVER     = ./zappy_server

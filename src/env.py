@@ -8,10 +8,30 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from src import protocol
-from src.rewards import compute_reward
+from src.rewards import compute_reward, set_global_timesteps
 
 logger = logging.getLogger("zappy.env")
 
+class TeamState:
+    """État partagé de l'équipe pour synchronisation cross-agents."""
+    
+    def __init__(self, win_count=6):
+        self.win_count = win_count
+        self.levels = {}
+    
+    def update(self, agent_id: int, level: int):
+        self.levels[agent_id] = level
+    
+    def max_level_count(self) -> int:
+        if not self.levels:
+            return 0
+        max_lvl = max(self.levels.values())
+        return sum(1 for l in self.levels.values() if l == max_lvl)
+    
+    def is_victory(self) -> bool:
+        if not self.levels:
+            return False
+        return sum(1 for l in self.levels.values() if l == protocol.MAX_LEVEL) >= self.win_count
 
 class ZappyEnv(gym.Env):
     """Un agent = un drone connecté à une équipe."""
@@ -84,17 +104,17 @@ class ZappyEnv(gym.Env):
         for attempt in range(max_retries):
             try:
                 self._open_socket()
-                self._expect("WELCOME")          # 1) le serveur salue
-                self._send(self.team)            # 2) on annonce l'equipe
-                slots = self._readline().strip()  # 3) nb de slots libres
+                self._expect("WELCOME")
+                self._send(self.team)
+                slots = self._readline().strip()
 
                 if not slots.lstrip("-").isdigit() or int(slots) <= 0:
                     self._close_socket()
                     time.sleep(0.3)
-                    continue                     # sature/parasite -> retry
+                    continue
 
                 self.client_slots = int(slots)
-                dims = self._readline().strip()   # 4) "X Y"
+                dims = self._readline().strip()
                 parts = dims.split()
                 if len(parts) == 2 and all(p.isdigit() for p in parts):
                     self.world = (int(parts[0]), int(parts[1]))
@@ -105,17 +125,6 @@ class ZappyEnv(gym.Env):
         raise ConnectionError(
             "Impossible de se connecter apres %d essais" % max_retries
         )
-
-    def _reconnect_internal(self):
-        """Rejoint le serveur en reutilisant notre propre slot fraichement libere.
-        
-        Comportement : try _connect() qui a 50 essais. Si saturation,
-        l'exception remonte et l'episode termine (reset() retentera).
-        """
-        self._connect()
-        self._set_level(1)
-        self._refresh_inventory()
-        self._refresh_vision()
 
     def _send_and_wait(self, cmd: str) -> str:
         self._send(cmd)
@@ -148,16 +157,7 @@ class ZappyEnv(gym.Env):
 
     # ----- helpers vision -----
     def _food_distance(self) -> float | None:
-        """Distance a la nourriture visible la plus proche.
-
-        parse_look retourne list[dict] avec cle 'food' pour chaque tuile.
-        Les tuiles sont en ordre radial :
-          tile 0 = case actuelle (distance 0)
-          tiles 1+ = anneaux externes...
-
-        Retourne l'index (float) de la premiere tuile avec food > 0,
-        ou None si aucune food visible.
-        """
+        """Distance a la nourriture visible la plus proche."""
         vision = self.state["vision"]
         if not vision:
             return None
@@ -214,6 +214,13 @@ class ZappyEnv(gym.Env):
         self._refresh_vision()
         return self._build_obs(), {}
 
+    def _reconnect_internal(self):
+        """Reconnexion après perte de socket (sans terminer l'episode)."""
+        self._connect()
+        self._set_level(1)
+        self._refresh_inventory()
+        self._refresh_vision()
+
     def step(self, action: int):
         self.steps += 1
 
@@ -240,9 +247,8 @@ class ZappyEnv(gym.Env):
                 try:
                     self._reconnect_internal()
                     return self._build_obs(), reward, False, False, event
-                except ConnectionError as exc:
-                    logger.warning("Reconnexion impossible apres mort (agent %s): %s", 
-                                   self.agent_id, exc)
+                except ConnectionError:
+                    logger.info("Agent %s MORT et serveur sature", self.agent_id)
                     self._close_socket()
                     return self._build_obs(), reward, True, False, event
 
@@ -285,11 +291,7 @@ class ZappyEnv(gym.Env):
             event["death"] = True
             reward = compute_reward(prev, self.state, event)
             self._close_socket()
-            try:
-                self._reconnect_internal()
-            except ConnectionError:
-                logger.warning("Reconnexion impossible apres loss (agent %s)", 
-                               self.agent_id)
+            self._reconnect_internal()
             return self._build_obs(), reward, False, False, event
 
         reward = compute_reward(prev, self.state, event)
