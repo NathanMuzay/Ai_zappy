@@ -535,10 +535,17 @@ def main():
 
     # 1) log texte
     log_path = args.log or os.environ.get("ZAPPY_TRAIN_LOG", "")
+    # AUTO-DÉTECTION : chemins probables avant de tomber en demo
+    if not log_path:
+        for candidate in ("logs/train.log", "logs/zappy.train.log"):
+            if os.path.exists(candidate) and parse_train_log(candidate):
+                log_path = candidate
+                break
     if log_path:
         records = parse_train_log(log_path)
         if records:
             sources_used.append(f"log texte ({log_path})")
+
 
     # 2) monitor CSV
     mon_dir = args.monitor_dir

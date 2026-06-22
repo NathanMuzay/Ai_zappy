@@ -41,6 +41,16 @@ class ZappyEnv(gym.Env):
 
     metadata = {"render_modes": []}
 
+    @staticmethod
+    def _parse_broadcast_direction(raw: str) -> int | None:
+        """'message K, texte' -> K (0..8) ou None si non parsable."""
+        try:
+            after = raw.split("message", 1)[1].strip()
+            k_str = after.split(",", 1)[0].strip()
+            return int(k_str)
+        except (IndexError, ValueError):
+            return None
+
     def __init__(self, host="localhost", port=4242, team="ia",
                  timeout=10.0, max_steps=5000,
                  agent_id=0, team_state=None):
@@ -302,6 +312,12 @@ class ZappyEnv(gym.Env):
         if async_messages:
             event["message"] = async_messages[0]
             event["all_messages"] = async_messages
+            # NOUVEAU : extraire direction K d'un appel join_incant
+            for raw in async_messages:
+                dir_k = self._parse_broadcast_direction(raw)
+                if dir_k is not None and "join_incant" in raw.lower():
+                    event["incant_call_dir"] = dir_k
+                    break
 
         # Traitement de la réponse selon la commande
         if cmd == "Look":

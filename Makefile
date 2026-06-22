@@ -76,7 +76,7 @@ endef
 define ANALYZE
     @echo "=== Lancement de l'analyse ==="
     $(VENV)/bin/python src/analyze_training.py \
-        --log logs/server.log \
+        --log logs/train.log --tb-logdir logs/tb
         --outdir logs/report
 endef
 

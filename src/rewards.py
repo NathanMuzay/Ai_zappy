@@ -271,8 +271,11 @@ def compute_reward(prev: dict, state: dict, event: dict) -> float:
                 or "collect" in msg.lower()):
         r += _BROADCAST_COORD_RECV
 
-    # ── l) GUIDAGE D'ÉLÉVATION (reward shaping dense) ─────────
+       # ── l) GUIDAGE D'ÉLÉVATION (reward shaping dense) ─────────
     guide_bonus = _GUIDE_BONUS_PHASE1 if phase == 1 else _GUIDE_BONUS_PHASE2
+    miss = elevation_guide.missing_stones(level, inventory)
+    ready_to_join = (len(miss) == 0 and level < MAX_LEVEL)
+    incant_call_dir = event.get("incant_call_dir")
     r += elevation_guide.guidance_reward(
         action_name=action,
         level=level,
@@ -280,6 +283,8 @@ def compute_reward(prev: dict, state: dict, event: dict) -> float:
         current_tile=cur_tile,
         food=food,
         players_on_tile=players_here if players_here > 0 else 1,
+        incant_call_dir=incant_call_dir,
+        ready_to_join=ready_to_join,
         bonus=guide_bonus,
         malus=_GUIDE_MALUS,
     )

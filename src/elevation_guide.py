@@ -1,16 +1,6 @@
-"""elevation_guide.py — Guide d'élévation pour Zappy (reward shaping dense).
+"""elevation_guide.py — Guide d'élévation Zappy (reward shaping dense).
 
-Transforme la récompense creuse (incantation réussie) en signal dense :
-à chaque step on connaît l'action qui rapproche de la prochaine élévation.
-
-Recettes officielles (niveau courant -> exigences pour le niveau suivant) :
-  1->2 : 1 joueur,  linemate=1
-  2->3 : 2 joueurs, linemate=1 deraumere=1 sibur=1
-  3->4 : 2 joueurs, linemate=2 sibur=1 phiras=2
-  4->5 : 4 joueurs, linemate=1 deraumere=1 sibur=2 phiras=1
-  5->6 : 4 joueurs, linemate=1 deraumere=2 sibur=1 mendiane=3
-  6->7 : 6 joueurs, linemate=1 deraumere=2 sibur=3 phiras=1
-  7->8 : 6 joueurs, linemate=2 deraumere=2 sibur=2 mendiane=2 phiras=2 thystame=1
+Ralliement directionnel optimal pour TOUS les paliers (1->8).
 """
 from __future__ import annotations
 
@@ -26,18 +16,29 @@ ELEVATION_REQUIREMENTS = {
 
 STONES = ["linemate", "deraumere", "sibur", "mendiane", "phiras", "thystame"]
 MAX_LEVEL = 8
-
 _ACTIONS_CACHE: list[str] = []
+
+# Conversion son K (0..8) -> action optimale d'approche.
+# On tourne d'abord vers la source puis on avance (convergence multi-step).
+_DIRECTION_TO_ACTION = {
+    0: "Incantation",   # émetteur ici
+    1: "Forward",       # devant
+    2: "Forward",       # devant-gauche : avancer rapproche
+    3: "Left",          # gauche : pivoter d'abord
+    4: "Left",          # arrière-gauche
+    5: "Left",          # arrière : demi-tour amorcé
+    6: "Right",         # arrière-droite
+    7: "Right",         # droite : pivoter d'abord
+    8: "Forward",       # devant-droite : avancer rapproche
+}
 
 
 def set_actions_reference(actions: list[str]) -> None:
-    """Injecte protocol.ACTIONS une fois au démarrage (évite l'import circulaire)."""
     global _ACTIONS_CACHE
     _ACTIONS_CACHE = list(actions)
 
 
 def missing_stones(level: int, inventory: dict) -> dict:
-    """Pierres encore manquantes dans l'inventaire pour élever."""
     if level >= MAX_LEVEL or level not in ELEVATION_REQUIREMENTS:
         return {}
     _, req = ELEVATION_REQUIREMENTS[level]
@@ -62,16 +63,23 @@ def tile_has_required_stones(level: int, tile: dict) -> bool:
     return all(tile.get(s, 0) >= req.get(s, 0) for s in STONES)
 
 
+def rally_action(incant_call_dir: int | None) -> str | None:
+    """Action pour se rapprocher de l'émetteur du join_incant."""
+    if incant_call_dir is None:
+        return None
+    return _DIRECTION_TO_ACTION.get(incant_call_dir, "Forward")
+
+
 def recommended_action(level: int, inventory: dict, current_tile: dict,
-                       food: int, players_on_tile: int = 1) -> str:
-    """Action conseillée selon l'état. Priorités :
-    survie -> collecte -> dépôt -> appel d'alliés (Broadcast) -> incantation.
-    """
+                       food: int, players_on_tile: int = 1,
+                       incant_call_dir: int | None = None,
+                       ready_to_join: bool = False) -> str:
+    """Priorités : survie -> collecte -> dépôt -> ralliement -> appel -> incanter."""
     # 1. Survie
     if food < 15 and current_tile.get("food", 0) > 0:
         return "Take food"
     if food < 8:
-        return "Forward"  # explorer pour trouver de la nourriture
+        return "Forward"
 
     if level >= MAX_LEVEL:
         return "Look"
@@ -83,7 +91,7 @@ def recommended_action(level: int, inventory: dict, current_tile: dict,
         for s in STONES:
             if s in miss and current_tile.get(s, 0) > 0:
                 return f"Take {s}"
-        return "Forward"  # rien d'utile ici -> explorer
+        return "Forward"
 
     # 3. Dépôt des pierres sur la case
     _, req = ELEVATION_REQUIREMENTS[level]
@@ -91,24 +99,31 @@ def recommended_action(level: int, inventory: dict, current_tile: dict,
         if current_tile.get(s, 0) < req.get(s, 0):
             return f"Set {s}"
 
-    # 4. Pierres prêtes : faut-il appeler des alliés ?
     need_players = required_players(level)
+
+    # 4. RALLIEMENT : si prêt et qu'un appel arrive, converger vers l'émetteur
+    if ready_to_join and incant_call_dir is not None and players_on_tile < need_players:
+        ral = rally_action(incant_call_dir)
+        if ral is not None:
+            return ral
+
+    # 5. Pierres prêtes mais pas assez de joueurs : appeler les alliés
     if players_on_tile < need_players:
         if "Broadcast join_incant" in _ACTIONS_CACHE:
             return "Broadcast join_incant"
         return "Connect_nbr"
 
-    # 5. Tout est prêt -> incanter
+    # 6. Tout est prêt -> incanter
     return "Incantation"
 
 
 def guidance_reward(action_name: str, level: int, inventory: dict,
                     current_tile: dict, food: int, players_on_tile: int = 1,
+                    incant_call_dir: int | None = None,
+                    ready_to_join: bool = False,
                     bonus: float = 1.5, malus: float = -0.05) -> float:
-    """+bonus si l'action == action conseillée, malus léger sinon.
-    Les actions neutres d'exploration ne sont pas pénalisées.
-    """
-    reco = recommended_action(level, inventory, current_tile, food, players_on_tile)
+    reco = recommended_action(level, inventory, current_tile, food,
+                              players_on_tile, incant_call_dir, ready_to_join)
     if action_name == reco:
         return bonus
     if action_name in ("Look", "Inventory", "Forward", "Right", "Left"):
