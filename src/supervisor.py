@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Superviseur Zappy — relance automatique du serveur quand les oeufs sont épuisés.
-Avec support du curriculum learning (phase-aware).
+Superviseur Zappy — relance automatique du serveur quand les œufs sont épuisés.
+ Avec support du curriculum learning (phase-aware) :
+   - Lecture des variables d'environnement SERVER_* pour la config serveur
+   - Permet de modifier les params serveur entre deux lancers sans code
 """
-
 from __future__ import annotations
 
 import os
@@ -14,36 +15,40 @@ import sys
 import time
 from pathlib import Path
 
-# Configuration
-SERVER_BIN   = "./zappy_server"
-PORT         = 4242
-WIDTH        = 10
-HEIGHT       = 10
-TEAM         = "ia"
-CLIENTS      = 200        # taille max du pool
-FREQ         = 100
-LOG_FILE     = "logs/server.log"
+# ── Configuration par défaut (PEUT être surchargée par env vars) ──────────────
+SERVER_BIN   = os.environ.get("SERVER_BIN",   "./zappy_server")
+PORT         = int(os.environ.get("PORT",      "4242"))
+WIDTH        = int(os.environ.get("WIDTH",     "10"))
+HEIGHT       = int(os.environ.get("HEIGHT",     "10"))
+TEAM         = os.environ.get("TEAM",          "ia")
+CLIENTS      = int(os.environ.get("CLIENTS",    "200"))
+FREQ         = int(os.environ.get("FREQ",      "100"))
+LOG_FILE     = os.environ.get("LOG_FILE",     "logs/server.log")
 PID_FILE     = ".server.pid"
 SUP_PID_FILE = ".supervisor.pid"
 
-SERVER_CMD = [
-    SERVER_BIN,
-    "-p", str(PORT),
-    "-x", str(WIDTH),
-    "-y", str(HEIGHT),
-    "-n", TEAM,
-    "-c", str(CLIENTS),
-    "-f", str(FREQ),
-    "--display-eggs", "true",
-    "-v",
-]
+def _build_server_cmd():
+    return [
+        SERVER_BIN,
+        "-p", str(PORT),
+        "-x", str(WIDTH),
+        "-y", str(HEIGHT),
+        "-n", TEAM,
+        "-c", str(CLIENTS),
+        "-f", str(FREQ),
+        "--display-eggs", "true",
+        "-v",
+    ]
+
+SERVER_CMD = _build_server_cmd()
+
 
 def log(msg: str) -> None:
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[supervisor {stamp}] {msg}", flush=True)
 
+
 def server_has_slots(port: int, team: str, timeout: float = 1.0) -> bool:
-    """Handshake reel : WELCOME + lecture slots."""
     try:
         with socket.create_connection(("localhost", port), timeout=timeout) as s:
             s.settimeout(timeout)
@@ -61,12 +66,14 @@ def server_has_slots(port: int, team: str, timeout: float = 1.0) -> bool:
     except (OSError, ValueError):
         return False
 
+
 def get_server_pid(pid_file: str) -> int | None:
     try:
         with open(pid_file) as f:
             return int(f.read().strip())
     except (FileNotFoundError, ValueError):
         return None
+
 
 def is_process_alive(pid: int) -> bool:
     try:
@@ -75,29 +82,32 @@ def is_process_alive(pid: int) -> bool:
     except OSError:
         return False
 
+
 def launch_server() -> subprocess.Popen[bytes]:
     os.makedirs("logs", exist_ok=True)
     log_file_fd = open(LOG_FILE, "a")
+    # Recharge la cmd au cas où les env vars ont changé
     proc = subprocess.Popen(
-        SERVER_CMD,
+        _build_server_cmd(),
         stdout=log_file_fd,
         stderr=subprocess.STDOUT,
     )
     with open(PID_FILE, "w") as f:
         f.write(str(proc.pid) + "\n")
-    log(f"Serveur lance (PID={proc.pid}) — log dans {LOG_FILE}")
+    log(f"Serveur lancé (PID={proc.pid}) — {WIDTH}x{HEIGHT} -f{FREQ} — log dans {LOG_FILE}")
     return proc
+
 
 def kill_server(proc: subprocess.Popen[bytes] | None, pid: int | None) -> None:
     if proc:
         proc.terminate()
         try:
             proc.wait(timeout=3)
-            log("Serveur arrete proprement.")
+            log("Serveur arrêté proprement.")
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            log("Serveur tue violemment (kill).")
+            log("Serveur tué violemment (kill).")
 
     if pid and is_process_alive(pid):
         try:
@@ -105,15 +115,17 @@ def kill_server(proc: subprocess.Popen[bytes] | None, pid: int | None) -> None:
             time.sleep(1)
             if is_process_alive(pid):
                 os.kill(pid, signal.SIGKILL)
-                log(f"PID {pid} tue par SIGKILL.")
+                log(f"PID {pid} tué par SIGKILL.")
         except OSError:
             pass
+
 
 HEALTH_CHECK_INTERVAL = 5
 DOWN_GRACE            = 20
 
+
 def main() -> None:
-    log("Demarrage du supervisor.")
+    log(f"Démarrage du supervisor — config : {WIDTH}x{HEIGHT} -f{FREQ} -c{CLIENTS}")
 
     old_pid = get_server_pid(PID_FILE)
     if old_pid and is_process_alive(old_pid):
@@ -139,14 +151,14 @@ def main() -> None:
     def signal_handler(signum: int, _frame) -> None:
         nonlocal running, proc, current_pid
         running = False
-        log("Signal recu, arret du supervisor.")
+        log("Signal reçu, arrêt du supervisor.")
         kill_server(proc, current_pid)
         for f in (PID_FILE, SUP_PID_FILE):
             try:
                 os.remove(f)
             except FileNotFoundError:
                 pass
-        log("Supervisor arrete.")
+        log("Supervisor arrêté.")
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, signal_handler)
@@ -171,7 +183,7 @@ def main() -> None:
         if not server_has_slots(PORT, TEAM):
             if down_since is None:
                 down_since = time.time()
-                log("Serveur injoignable ou oeufs epuises — debut du comptage.")
+                log("Serveur injoignable ou œufs épuisés — début du comptage.")
             else:
                 elapsed = time.time() - down_since
                 if elapsed >= DOWN_GRACE:
@@ -183,8 +195,9 @@ def main() -> None:
                     down_since = None
         else:
             if down_since is not None:
-                log("Serveur a nouveau joignable.")
+                log("Serveur à nouveau joignable.")
                 down_since = None
+
 
 if __name__ == "__main__":
     main()

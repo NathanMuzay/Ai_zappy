@@ -62,7 +62,14 @@ def vision_tile_count(level: int) -> int:
     return sum(2 * k + 1 for k in range(level + 1))
 
 
-# Encodage des actions discrètes vers les commandes serveur.
+# Broadcast à émettre : on encode des messages fixes de coordination.
+# Le serveur attend "Broadcast <texte>". On limite à un vocabulaire
+# restreint pour que l'agent apprenne à les utiliser.
+BROADCAST_MESSAGES = [
+    "join_incant",     # appel : venez sur ma case pour incanter
+    "ready",           # je suis prêt / sur place
+]
+
 ACTIONS = [
     "Forward",
     "Right",
@@ -86,6 +93,8 @@ ACTIONS = [
     "Set phiras",
     "Set thystame",
     "Incantation",
+    "Broadcast join_incant",
+    "Broadcast ready",
 ]
 
 

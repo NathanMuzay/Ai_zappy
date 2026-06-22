@@ -2,7 +2,7 @@
 src/__pycache__/*
 data/*
 logs/*
+models/*
 .server.pid
 .supervisor.pid
-EXPLICATIF1.md
-EXPLICATIF2.md
+EXPLICATIF*
