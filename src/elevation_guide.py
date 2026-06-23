@@ -1,6 +1,17 @@
 """elevation_guide.py — Guide d'élévation Zappy (reward shaping dense).
 
 Ralliement directionnel optimal pour TOUS les paliers (1->8).
+
+CHANGELOG v2:
+  - _DIRECTION_TO_ACTION : directions 2 et 8 corrigées (2="Left", 8="Right")
+    Raison : en système de coordonnées Zappy, 2 = avant-gauche et 8 = avant-droit.
+    Pour atteindre ces cases, il faut d'abord pivoter vers le côté puis avancer.
+    Avant: 2="Forward" (trop long, risquait de contourner), 8="Forward" (même problème).
+    Après: 2="Left" (pivote puis avance), 8="Right" (pivote puis avance).
+  - rally_action(): vérifie maintenant explicitement que direction est dans 0..8,
+    sinon retourne "Forward" par sécurité (pas None) pour éviter les None checks.
+  - recommended_action(): protège aussi contre incant_call_dir hors plage.
+  - set_actions_reference(): idempotent, appelé depuis env.py __init__.
 """
 from __future__ import annotations
 
@@ -19,21 +30,35 @@ MAX_LEVEL = 8
 _ACTIONS_CACHE: list[str] = []
 
 # Conversion son K (0..8) -> action optimale d'approche.
+#
+# Géométrie Zappy des sons :
+#   0 = même case que l'émetteur  → Incantation (on est déjà sur place)
+#   1 = devant                    → Forward (avancer tout droit)
+#   2 = avant-gauche (diag)      → Left (pivoter gauche, + avanc)
+#   3 = gauche                    → Left (pivoter)
+#   4 = arrière-gauche (diag)     → Left (pivoter, + demi-tour amorcé)
+#   5 = derrière                  → Left × 2 (demi-tour) — 2 fois = +1.0 turn cost
+#                                   En pratique Left×2 fonctionne bien
+#   6 = arrière-droite (diag)     → Right (pivoter, + demi-tour amorcé)
+#   7 = droite                    → Right (pivoter)
+#   8 = avant-droite (diag)       → Right (pivoter droite, + avanç)
+#
 # On tourne d'abord vers la source puis on avance (convergence multi-step).
 _DIRECTION_TO_ACTION = {
     0: "Incantation",   # émetteur ici
     1: "Forward",       # devant
-    2: "Forward",       # devant-gauche : avancer rapproche
-    3: "Left",          # gauche : pivoter d'abord
-    4: "Left",          # arrière-gauche
-    5: "Left",          # arrière : demi-tour amorcé
+    2: "Left",          # avant-gauche : pivoter gauche pour aligned
+    3: "Left",          # gauche
+    4: "Left",          # arrière-gauche : pivoter + avancer = converge
+    5: "Left",          # derrière : demi-tour amorcé via Left × 2
     6: "Right",         # arrière-droite
-    7: "Right",         # droite : pivoter d'abord
-    8: "Forward",       # devant-droite : avancer rapproche
+    7: "Right",         # droite
+    8: "Right",         # avant-droite : pivoter droite pour aligned
 }
 
 
 def set_actions_reference(actions: list[str]) -> None:
+    """Enregistre la table des actions. Appelées depuis env.py __init__."""
     global _ACTIONS_CACHE
     _ACTIONS_CACHE = list(actions)
 
@@ -63,10 +88,16 @@ def tile_has_required_stones(level: int, tile: dict) -> bool:
     return all(tile.get(s, 0) >= req.get(s, 0) for s in STONES)
 
 
-def rally_action(incant_call_dir: int | None) -> str | None:
-    """Action pour se rapprocher de l'émetteur du join_incant."""
+def rally_action(incant_call_dir: int | None) -> str:
+    """Action pour se rapprocher de l'émetteur du join_incant.
+    
+    Returns toujours une action (jamais None) pour éviter les exceptions.
+    Direction hors plage 0..8 → "Forward" par défaut.
+    """
     if incant_call_dir is None:
-        return None
+        return "Forward"
+    if not (0 <= incant_call_dir <= 8):
+        return "Forward"
     return _DIRECTION_TO_ACTION.get(incant_call_dir, "Forward")
 
 
@@ -103,9 +134,11 @@ def recommended_action(level: int, inventory: dict, current_tile: dict,
 
     # 4. RALLIEMENT : si prêt et qu'un appel arrive, converger vers l'émetteur
     if ready_to_join and incant_call_dir is not None and players_on_tile < need_players:
-        ral = rally_action(incant_call_dir)
-        if ral is not None:
-            return ral
+        # Sécurité : ne pas planter si direction invalide
+        if 0 <= incant_call_dir <= 8:
+            ral = rally_action(incant_call_dir)
+            if ral is not None:
+                return ral
 
     # 5. Pierres prêtes mais pas assez de joueurs : appeler les alliés
     if players_on_tile < need_players:

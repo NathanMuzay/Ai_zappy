@@ -1,4 +1,4 @@
-"""train.py — Entrainement multi-agents avec curriculum learning + guidage d'élévation."""
+"""train.py — Entrainement multi-agents avec curriculum learning."""
 from __future__ import annotations
 
 import argparse
@@ -15,30 +15,22 @@ from stable_baselines3.common.callbacks import BaseCallback
 
 from src.env import ZappyEnv, TeamState
 from src import protocol
-from src import elevation_guide
 from src.rewards import set_global_timesteps, get_phase
 
-# ── Logging : console + fichier (logs/train.log) ─────────────────────────────
-os.makedirs("logs", exist_ok=True)
+# CHANGELOG v2 : initialiser elevation_guide AVANT la création des envs
+# pour que le cache d'actions soit disponible dès le premier step.
+# L'appel dans env.__init__ est un filet de sécurité (idempotent).
+try:
+    from src.elevation_guide import set_actions_reference
+    set_actions_reference(protocol.ACTIONS)
+except ImportError:
+    pass  # elevation_guide optionnel en dehors de l'arbre src/
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s:%(name)s:%(message)s"
+)
 logger = logging.getLogger("zappy.train")
-logger.setLevel(logging.INFO)
-logger.propagate = False
-
-_fmt = logging.Formatter("%(levelname)s:%(name)s:%(message)s")
-
-_console = logging.StreamHandler()
-_console.setFormatter(_fmt)
-
-_file = logging.FileHandler("logs/train.log", mode="a", encoding="utf-8")
-_file.setFormatter(_fmt)
-
-if not logger.handlers:
-    logger.addHandler(_console)
-    logger.addHandler(_file)
-
-# Injecte la liste des actions dans le guide (évite l'import circulaire)
-elevation_guide.set_actions_reference(protocol.ACTIONS)
 
 CURRICULUM_PHASE1_STEPS = 100000   # steps avant phase 2
 CURRICULUM_PHASE2_STEPS = 500000   # steps avant phase 3 (final)
@@ -56,8 +48,10 @@ class CurriculumCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         ts = self.num_timesteps
+        # Met à jour le module rewards (état global)
         set_global_timesteps(ts)
 
+        # Détermine la phase
         if ts < self.phase1_end:
             new_phase = 1
         elif ts < self.phase2_end:
@@ -70,21 +64,24 @@ class CurriculumCallback(BaseCallback):
             self.phase = new_phase
             if self.verbose:
                 logger.info("Phase %d → %d @ %d steps", old, new_phase, ts)
+            # Log fort pour analyse post-entrainement
             if new_phase == 2:
                 logger.info(
                     "PHASE_TRANSITION phase1→phase2 | timesteps=%d | "
-                    "server_config: small_map_high_food", ts
+                    "server_config: small_map_high_food",
+                    ts
                 )
             elif new_phase == 3:
                 logger.info(
                     "PHASE_TRANSITION phase2→phase3 | timesteps=%d | "
-                    "server_config: normal_map_normal_food", ts
+                    "server_config: normal_map_normal_food",
+                    ts
                 )
         return True
 
 
 class ZappyCallback(BaseCallback):
-    """Logging des métriques toutes les N secondes."""
+    """Logging des métriques toutes les N steps."""
 
     def __init__(self, interval_sec=30, verbose=0):
         super().__init__(verbose)
@@ -119,7 +116,7 @@ def make_env(rank, host, port, team, client_id, team_state):
             timeout=10.0,
             max_steps=5000,
             agent_id=client_id + rank,
-            team_state=team_state,
+            team_state=team_state
         )
     return _init
 
@@ -140,27 +137,36 @@ def main():
 
     team_state = TeamState(win_count=args.win_count)
 
-    env_fns = [
-        make_env(rank, args.host, args.port, args.team, 0, team_state)
-        for rank in range(args.clients)
-    ]
-    vec_env = SubprocVecEnv(env_fns)
+    vec_env = SubprocVecEnv([
+        make_env(i, args.host, args.port, args.team, 0, team_state)
+        for i in range(args.clients)
+    ])
 
-    model_path = Path("models/zappy_ppo")
-    model_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = Path("models")
+    checkpoint_dir.mkdir(exist_ok=True)
+    model_path = checkpoint_dir / "zappy_ppo"
 
-    if args.resume and Path(f"{args.resume}.zip").exists():
-        logger.info(f"Reprise depuis {args.resume}.zip")
-        model = PPO.load(args.resume, env=vec_env)
+    if args.resume and (checkpoint_dir / f"{args.resume}.zip").exists():
+        logger.info(f"Reprise depuis {args.resume}")
+        model = PPO.load(args.resume, env=vec_env, device="cpu")
     else:
-        from src.agent import build_model
-        model = build_model(vec_env)
+        logger.info("Nouveau modèle PPO")
+        model = PPO(
+            "MlpPolicy",
+            vec_env,
+            learning_rate=3e-4,
+            n_steps=2048,
+            batch_size=64,
+            n_epochs=10,
+            gamma=0.99,
+            gae_lambda=0.95,
+            device="cpu",
+            verbose=0,
+        )
 
-    from src.agent import checkpoint_callback
     callbacks = [
-        CurriculumCallback(verbose=1),
-        ZappyCallback(interval_sec=30, verbose=1),
-        checkpoint_callback(freq=10000),
+        CurriculumCallback(verbose=0),
+        ZappyCallback(interval_sec=30, verbose=0),
     ]
 
     try:

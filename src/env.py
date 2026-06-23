@@ -32,24 +32,13 @@ class TeamState:
     def is_victory(self) -> bool:
         if not self.levels:
             return False
-        return sum(1 for l in self.levels.values()
-                   if l == protocol.MAX_LEVEL) >= self.win_count
+        return sum(1 for l in self.levels.values() if l == protocol.MAX_LEVEL) >= self.win_count
 
 
 class ZappyEnv(gym.Env):
     """Un agent = un drone connecté à une équipe."""
 
     metadata = {"render_modes": []}
-
-    @staticmethod
-    def _parse_broadcast_direction(raw: str) -> int | None:
-        """'message K, texte' -> K (0..8) ou None si non parsable."""
-        try:
-            after = raw.split("message", 1)[1].strip()
-            k_str = after.split(",", 1)[0].strip()
-            return int(k_str)
-        except (IndexError, ValueError):
-            return None
 
     def __init__(self, host="localhost", port=4242, team="ia",
                  timeout=10.0, max_steps=5000,
@@ -67,12 +56,19 @@ class ZappyEnv(gym.Env):
         self.buffer = ""
         self.world = (0, 0)
         self.steps = 0
-        self.pending_messages = []      # messages reçus en attente de comptage
         self.state = self._empty_state()
 
         self.action_space = spaces.Discrete(len(protocol.ACTIONS))
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(24,), dtype=np.float32)
+
+        # CHANGELOG v2 : initialiser le cache d'actions pour elevation_guide
+        # Avoid circular import: elevation_guide.set_actions_reference is safe here
+        try:
+            from src.elevation_guide import set_actions_reference
+            set_actions_reference(protocol.ACTIONS)
+        except ImportError:
+            logger.warning("elevation_guide non disponible pour set_actions_reference")
 
     # ----- gestion socket -----
     def _open_socket(self):
@@ -105,9 +101,12 @@ class ZappyEnv(gym.Env):
         return line
 
     def _expect(self, expected: str):
+        """Lit une ligne et vérifie qu'elle correspond à 'expected'."""
         line = self._readline().strip()
         if line != expected:
-            raise ConnectionError("Attendu '%s', reçu '%s'" % (expected, line))
+            raise ConnectionError(
+                "Attendu '%s', reçu '%s'" % (expected, line)
+            )
 
     def _connect(self):
         """Connexion handshake. Retry quasi-infini tant que slots épuisés."""
@@ -144,39 +143,28 @@ class ZappyEnv(gym.Env):
                         self.agent_id, attempt)
 
     def _send_and_wait(self, cmd: str) -> str:
-        """Envoie une commande, accumule les messages asynchrones reçus
-        AVANT la réponse (au lieu de les jeter) puis renvoie la réponse."""
         self._send(cmd)
         while True:
             line = self._readline().strip()
             if line == "dead":
                 self.state["alive"] = False
                 return "dead"
-            if line.startswith("message"):
-                self.pending_messages.append(line)   # NE PLUS JETER
-                continue
-            if line.startswith("eject"):
-                self.pending_messages.append(line)
+            if line.startswith("message") or line.startswith("eject"):
                 continue
             return line
 
     def _read_next(self) -> str:
-        """Lit la prochaine ligne serveur en conservant les broadcasts."""
+        """Lit la prochaine ligne serveur SANS rien émettre (filtre broadcasts)."""
         while True:
             line = self._readline().strip()
-            if line.startswith("message"):
-                self.pending_messages.append(line)
-                continue
-            if line.startswith("eject"):
-                self.pending_messages.append(line)
+            if line.startswith("message") or line.startswith("eject"):
                 continue
             return line
 
     def _drain_messages(self) -> list[str]:
-        """Vide le buffer des messages asynchrones en attente + ceux déjà
-        capturés par _send_and_wait/_read_next."""
-        messages = list(self.pending_messages)
-        self.pending_messages.clear()
+        """Lit tous les messages asynchrones en attente dans le buffer.
+        Retourne la liste des textes de message (sans le préfixe 'message K, ')."""
+        messages = []
         while "\n" in self.buffer:
             line, self.buffer = self.buffer.split("\n", 1)
             line = line.strip()
@@ -192,11 +180,11 @@ class ZappyEnv(gym.Env):
             "inventory": {r: 0 for r in protocol.RESOURCES},
             "vision": [],
             "alive": True,
-            "food_dist": None,
         }
 
     # ----- helpers vision -----
-    def _food_distance(self):
+    def _food_distance(self) -> float | None:
+        """Distance à la nourriture visible la plus plus proche."""
         vision = self.state["vision"]
         if not vision:
             return None
@@ -242,7 +230,6 @@ class ZappyEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.steps = 0
-        self.pending_messages.clear()
         was_dead = not self.state["alive"]
         self.state = self._empty_state()
         if was_dead:
@@ -264,8 +251,7 @@ class ZappyEnv(gym.Env):
     def step(self, action: int):
         self.steps += 1
 
-        if not isinstance(action, (int, np.integer)) or \
-           not (0 <= int(action) < len(protocol.ACTIONS)):
+        if not isinstance(action, (int, np.integer)) or not (0 <= int(action) < len(protocol.ACTIONS)):
             return self._build_obs(), -1.0, False, False, {"invalid": True}
 
         cmd = protocol.encode_action(int(action))
@@ -289,14 +275,16 @@ class ZappyEnv(gym.Env):
             try:
                 self._reconnect_internal()
             except (ConnectionError, OSError):
-                logger.error("Agent %s : reconnexion impossible, épisode terminé",
-                             self.agent_id)
+                logger.error(
+                    "Agent %s : reconnexion impossible, épisode terminé",
+                    self.agent_id)
                 self._close_socket()
                 return self._build_obs(), -1.0, True, False, event
             return self._build_obs(), 0.0, False, False, event
 
     def _do_step(self, cmd: str, prev: dict, event: dict):
-        """Logique réelle d'un step."""
+        """Logique réelle d'un step. Peut lever ConnectionError/OSError,
+        rattrapée par step()."""
         response = self._send_and_wait(cmd)
 
         if response == "dead":
@@ -307,33 +295,40 @@ class ZappyEnv(gym.Env):
             self._reconnect_internal()
             return self._build_obs(), reward, False, False, event
 
-        # Drainer les messages asynchrones (coordination shaping)
+        # Drainer les messages asynchrones (pour coordination shaping)
         async_messages = self._drain_messages()
         if async_messages:
-            event["message"] = async_messages[0]
+            # CHANGELOG v2 : parser les messages pour extraire la direction de ralliement
+            # On garde la direction du message "join_incant" le plus pertinent
             event["all_messages"] = async_messages
-            # NOUVEAU : extraire direction K d'un appel join_incant
-            for raw in async_messages:
-                dir_k = self._parse_broadcast_direction(raw)
-                if dir_k is not None and "join_incant" in raw.lower():
-                    event["incant_call_dir"] = dir_k
-                    break
+            call_dir = None
+            for raw in reversed(async_messages):
+                # Parsing : "message K, texte" → (direction, texte)
+                parsed = protocol.parse_broadcast(raw)
+                if parsed is not None:
+                    direction, text = parsed
+                    # "join_incant" = appel de ralliement
+                    if "join_incant" in text:
+                        call_dir = direction
+                        event["message"] = raw  # texte brut du dernier join_incant
+                        break  # garder le plus récent
+            if call_dir is not None:
+                event["incant_call_dir"] = call_dir
+            elif async_messages:
+                event["message"] = async_messages[0]
 
         # Traitement de la réponse selon la commande
         if cmd == "Look":
             self.state["vision"] = protocol.parse_look(response)
-            self.state["food_dist"] = self._food_distance()
             event["ok"] = True
         elif cmd == "Inventory":
-            if response.startswith("["):
-                self.state["inventory"] = protocol.parse_inventory(response)
+            self._refresh_inventory()
             event["ok"] = True
         elif cmd == "Incantation":
             if response.startswith("Elevation"):
                 level_line = self._read_next()
                 if level_line.startswith("Current level"):
                     new_level = int(level_line.split(":")[1].strip())
-                    event["old_level"] = self.state["level"]
                     self.state["level"] = new_level
                     event["elevation"] = True
                     if self.team_state is not None:
@@ -347,12 +342,7 @@ class ZappyEnv(gym.Env):
         elif cmd == "Fork":
             if response == "ok":
                 event["ok"] = True
-            else:
-                event["ko"] = True
-        elif cmd.startswith("Broadcast"):
-            # Le serveur répond "ok" à un Broadcast accepté.
-            if response == "ok":
-                event["ok"] = True
+                event["fork_start_time"] = 0  # initialisé par rewards.py dans _FORK_COUNTS
             else:
                 event["ko"] = True
         else:

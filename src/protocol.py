@@ -35,12 +35,12 @@ def parse_inventory(line: str) -> dict[str, int]:
     return inv
 
 
-
 def parse_look(line: str) -> list[dict[str, int]]:
     """Parse '[player, food, thystame food,,]' -> liste de tuiles (compteurs)."""
     content = line.strip().strip("[]")
     tiles = []
     for tile in content.split(","):
+        # Bugfix: counts était utilisé avant initialisation → déplacé AVANT la boucle interne
         counts = {"player": 0, **{r: 0 for r in RESOURCES}}
         for tok in tile.strip().split():
             if tok in counts:
@@ -50,8 +50,15 @@ def parse_look(line: str) -> list[dict[str, int]]:
 
 
 def parse_broadcast(line: str) -> tuple[int, str] | None:
-    """Parse 'message K, text' -> (direction, text)."""
-    m = re.match(r"message\s+(\d+),\s*(.*)", line.strip())
+    """Parse 'message K, text' -> (direction, text).
+    
+    Le format Zappy serveur est : "message K, texte" où K est la direction 0..8.
+    Direction 0 = même case que l'émetteur. Robuste aux espaces variables.
+    
+    Returns:
+        (direction, text) si parsing OK, None sinon.
+    """
+    m = re.match(r"message\s+(\d+)\s*,\s*(.*)", line.strip())
     if m:
         return int(m.group(1)), m.group(2)
     return None
